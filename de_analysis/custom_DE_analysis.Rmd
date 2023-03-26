@@ -1,0 +1,270 @@
+---
+title: "differential-expression-analysis"
+author: "Victoria Latynina"
+date: "2023-03-21"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Differential Expression analysis
+
+Dataset: GSE106542 (<https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE106542>)
+
+Differences in expression between TEMRA IL7-high and TEMRA IL7 low
+
+### Pipeline steps:
+
+-   Preprocess counts data
+
+-   Run VST for PCA, remove outliers, run PCA
+
+-   Run differential expression
+
+-   Find pathways for DE
+
+```{r rna, warning=F, message=F}
+library(ggplot2)
+library(DESeq2)
+library(apeglm)
+library(ggrepel)
+library(dplyr)
+library(org.Hs.eg.db)
+library(PCAtools)
+library(GEOquery)
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=40),tidy=TRUE)
+```
+
+## Preprocess counts data
+
+```{r rna1, warning=F, message=F, tidy=TRUE}
+path <- "~/Code/sys_bio/Part_2/materials/GSE106542_RAW/GSE106542_Bulk_raw_counts.txt"
+data <- read.table(path, row.names = 1, sep="\t", header = 1)
+data$gene_symbol <- mapIds(org.Hs.eg.db, 
+                           gsub("\\.\\d+", "", rownames(data)), 
+                           column="SYMBOL", "ENSEMBL")
+data$gene_name <- mapIds(org.Hs.eg.db, 
+                         gsub("\\.\\d+", "", rownames(data)), 
+                         column="GENENAME", "ENSEMBL")
+
+mapping <- data[, c("gene_symbol", "gene_name"), 
+                drop = TRUE]
+counts <- data[, 2:ncol(data)-2]
+colnames(counts) <- gsub("BRNA_", "", colnames(counts))
+
+annotations <- getGEO("GSE106542")[[1]]
+pdata <- pData(annotations)[, c("title", 
+                                "description", "organism_ch1", 
+                                "molecule_ch1", "subject #:ch1", 
+                                "cell subtype surface markers:ch1", 
+                                "cell subtype:ch1", "cell type:ch1", 
+                                "longitudinal visit:ch1")]
+rownames(pdata) <- gsub("Bulk_RNA-seq_", "", pdata$title)
+```
+
+### Match columns and rows for all the data
+
+```{r rna129, warning=F, message=F, tidy=TRUE}
+col_order <- rownames(pdata)
+counts <- counts[, col_order]
+identical(colnames(counts), rownames(pdata))
+```
+
+### Create a new dataset without "TEM" and "TCM" rows
+
+```{r rna21, warning=F, message=F, tidy=TRUE}
+temra_pdata <- subset(pdata, 
+pdata$`cell subtype:ch1` != "TEM" & pdata$`cell subtype:ch1` != "TCM")
+col_order <- rownames(temra_pdata)
+temra_counts <- counts[, col_order]
+identical(colnames(temra_counts), 
+          rownames(temra_pdata))
+```
+
+## Run differential expression for all cell subtypes
+
+```{r rna22, warning=F, message=F, tidy=TRUE}
+pdata$Cell_subtype <- as.character(pdata$`cell subtype:ch1`)
+pdata$Cell_subtype <- factor(pdata$Cell_subtype, 
+                             levels=c("TEM", 
+                                      "TCM", 
+                                      "IL7Rhigh_TEMRA", 
+                                      "IL7Rlow_TEMRA"))
+pdata$Donor <- as.character(pdata$`subject #:ch1`)
+pdata$Donor <- factor(pdata$Donor, 
+                             levels=c("Subject16", 
+                                      "Subject20", 
+                                      "Subject21", 
+                                      "Subject22",
+                                      "Subject23"))
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = pdata,
+                              design= ~ Cell_subtype + Donor)
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+## Run VST for PCA, run PCA and notice outliers
+
+```{r rna33, warning=F, message=F, tidy=TRUE}
+vst <- varianceStabilizingTransformation(dds)
+plotPCA(vst, 
+        intgroup=c("Cell_subtype"), 
+        ntop=nrow(vst)) + theme_bw() +
+  theme(aspect.ratio = 1)
+
+```
+
+## Add thresholds to get rid of outliers, plot PCA by donors and by cell subtypes
+
+```{r rna310, warning=F, message=F, tidy=TRUE}
+PCA_data <- plotPCA(vst, 
+        intgroup=c("Cell_subtype", "Donor"), 
+        ntop=nrow(vst), returnData = TRUE)
+
+cell_colors <- c("TEM" = "red", "TCM" = "blue", "IL7Rhigh_TEMRA" = "green", "IL7Rlow_TEMRA" = "pink")
+donor_shapes <- c("Subject16"=20, 
+                  "Subject20"=21, 
+                  "Subject21"=22, 
+                  "Subject22"=23,
+                  "Subject23"=24)
+outliers <- PCA_data$PC2 > 5
+PCA_data <- subset(PCA_data, !outliers)
+ggplot(PCA_data, aes(x = PC1, y = PC2, color = Cell_subtype, shape = Donor)) + 
+  geom_point(size = 4) + 
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_color_manual(values = cell_colors) +
+  scale_shape_manual(values = donor_shapes)
+```
+
+```{r rna444, message=FALSE, warning=FALSE, echo=F, tidy=TRUE}
+pca_data <- prcomp(t(assay(vst)))
+pca_df <- data.frame(PC1 = pca_data$x[,1], 
+                     PC2 = pca_data$x[,2],
+                     Donor = colData(vst)$Donor)
+
+threshold_PC1 <- 3 * sd(pca_df$PC1)
+threshold_PC2 <- 0.38 * sd(pca_df$PC2)
+fpca_df <- pca_df[
+  abs(pca_df$PC1) < threshold_PC1 & abs(pca_df$PC2) < threshold_PC2,]
+
+p <- ggplot(fpca_df, aes(x = PC1, y = PC2, color = Donor)) +
+  geom_point() +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+#print(p)
+```
+
+```{r rna44, warning=F, message=F, echo=F, tidy=TRUE}
+pca_data <- prcomp(t(assay(vst)))
+pca_df <- data.frame(PC1 = pca_data$x[,1], 
+                     PC2 = pca_data$x[,2],
+                     Cell_subtype = colData(vst)$Cell_subtype)
+
+threshold_PC1 <- 3 * sd(pca_df$PC1)
+threshold_PC2 <- 0.38 * sd(pca_df$PC2)
+fpca_df <- pca_df[
+  abs(pca_df$PC1) < threshold_PC1 & abs(pca_df$PC2) < threshold_PC2,]
+
+p <- ggplot(fpca_df, aes(x = PC1, y = PC2, color = Cell_subtype)) +
+  geom_point() +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+# print(p)
+```
+
+## Run differential expression for target cell subtypes ("IL7Rhigh_TEMRA", "IL7Rlow_TEMRA")
+
+```{r rna2, warning=F, message=F, tidy=TRUE}
+temra_pdata$Cell_subtype <- as.character(temra_pdata$`cell subtype:ch1`)
+temra_pdata$Cell_subtype <- factor(temra_pdata$Cell_subtype, levels=c("IL7Rhigh_TEMRA", "IL7Rlow_TEMRA"))
+temra_pdata$Donor <- as.character(temra_pdata$`subject #:ch1`)
+temra_pdata$Donor <- factor(temra_pdata$Donor, 
+                             levels=c("Subject16", 
+                                      "Subject20", 
+                                      "Subject21", 
+                                      "Subject22",
+                                      "Subject23"))
+dds <- DESeqDataSetFromMatrix(countData = temra_counts,
+                              colData = temra_pdata,
+                              design= ~ Cell_subtype + Donor)
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+## PCA of target cell subtypes
+
+```{r, rna222, warning=F, message=F, tidy=TRUE}
+vst <- varianceStabilizingTransformation(dds)
+
+pca_data <- prcomp(t(assay(vst)))
+pca_df <- data.frame(PC1 = pca_data$x[,1], 
+                     PC2 = pca_data$x[,2],
+                     Cell_subtype = colData(vst)$Cell_subtype,
+                     Donor = colData(vst)$Donor)
+
+threshold_PC1 <- 80 #50 * sd(pca_df$PC1)
+threshold_PC2 <- 10 * sd(pca_df$PC2)
+fpca_df <- pca_df[
+  abs(pca_df$PC1) < threshold_PC1 & abs(pca_df$PC2) < threshold_PC2,]
+
+ggplot(fpca_df, aes(x = PC1, y = PC2, color = Cell_subtype, shape = Donor)) + 
+  geom_point(size = 4) + 
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_color_manual(values = cell_colors) +
+  scale_shape_manual(values = donor_shapes)
+```
+
+## Get volcano plots
+
+```{r rna4, warning=F, message=F, tidy=TRUE}
+res <- lfcShrink(dds, coef="Cell_subtype_IL7Rlow_TEMRA_vs_IL7Rhigh_TEMRA", 
+                 type="apeglm")
+res$gene_symbol <- mapIds(org.Hs.eg.db, 
+                          gsub("\\.\\d+", "", rownames(res)), 
+                          column="SYMBOL", "ENSEMBL")
+head(res)
+resDF <- as.data.frame(res)
+ggplot(resDF, aes(x=log2FoldChange, y=-log10(padj), color=padj < 0.05)) +
+  geom_point() + theme_bw() + scale_color_manual(values=c("black", "red")) +
+  geom_text_repel(data=resDF %>% dplyr::filter(padj < 1e-7), 
+aes(label=gene_symbol), color="black") +
+xlim(c(-8, 8)) + 
+  xlab("low TEMRA    Log2FC    high TEMRA") + 
+  geom_vline(xintercept = 0, lty=2) +
+  theme(aspect.ratio = 1)
+```
+
+## Pathway analysis
+
+```{r rna5, echo=T, warning=F, message=F, tidy=TRUE}
+library(fgsea)
+
+deResults <- results(dds)
+deResults$gene_symbol <- mapIds(org.Hs.eg.db, 
+                                gsub("\\.\\d+", "", rownames(deResults)), 
+                                column="SYMBOL", "ENSEMBL")
+stats <- deResults$stat
+names(stats) <- deResults$gene_symbol
+complete_cases <- complete.cases(stats)
+stats <- stats[complete_cases]
+top_genes <- resDF %>% dplyr::filter(padj < 1e-7)
+```
+
+```{r rna6, echo=T, warning=F, message=F, tidy=TRUE}
+load("~/Code/sys_bio/Part_2/materials/keggSymbolHuman.rdata")
+fgseaResults <- fgseaMultilevel(keggSymbolHuman, 
+                                stats, 
+                                minSize = 15, 
+                                maxSize = 500)
+
+topPathwaysUp <- fgseaResults[ES > 0, ][head(order(pval), n=8), pathway]
+topPathwaysDown <- fgseaResults[ES < 0, ][head(order(pval), n=8), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+plotGseaTable(keggSymbolHuman[topPathways], stats, fgseaResults, gseaParam = 0.5,
+              pathwayLabelStyle=list(size=6))
+```

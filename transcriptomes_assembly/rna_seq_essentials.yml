@@ -1,0 +1,13 @@
+name: rna-seq-essentials
+channels:
+ - bioconda
+ - conda-forge
+dependencies:
+  - multiqc
+  - fastqc
+  - fastp
+  - trimmomatic
+  - trinity
+  - busco
+  - samtools
+  - salmon

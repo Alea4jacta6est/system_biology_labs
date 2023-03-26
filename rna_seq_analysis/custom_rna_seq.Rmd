@@ -1,0 +1,136 @@
+---
+title: "rna-seq-analysis"
+author: "Victoria Latynina"
+date: "2023-03-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## RNA-seq analysis
+
+### Pipeline steps:
+
+Combine counts into count matrix
+
+Run VST for PCA, run PCA
+
+Run differential expression
+
+Find pathways for DE
+
+```{r rna, warning=F, message=F}
+library(ggplot2)
+library(DESeq2)
+library(apeglm)
+library(ggrepel)
+library(dplyr)
+library(org.Mm.eg.db)
+library(PCAtools)
+```
+
+## Combine counts into count matrix
+
+```{r rna1, warning=F, message=F}
+countFiles <- list.files("~/Code/sys_bio/Part_2/materials/GSE137888_RAW", full.names = T)
+countFiles
+
+
+counts <- lapply(countFiles, function(countsFile) {
+  read.table(countsFile, sep="\t", header=1, skip = 1, row.names = 1, stringsAsFactors = F, comment.char = "")
+})
+
+head(counts[[1]])
+
+
+counts <- lapply(counts, function(countsTable) countsTable[, "Count", drop=F])
+counts <- do.call(cbind, counts)
+colnames(counts) <- gsub(".*(SRR\\d+).*", "\\1", countFiles)
+head(counts)
+
+
+coldata <- data.frame(
+  srr=gsub(".*(SRR\\d+).*", "\\1", countFiles),
+  condition=gsub(".*(SRR\\d+)_(Control|Prdm16).*", "\\2", countFiles),
+  row.names =gsub(".*(SRR\\d+).*", "\\1", countFiles)
+)
+
+write.table(coldata, file="~/Code/sys_bio/Part_2/materials/GSE137888_coldata.tsv", sep="\t", quote=F, col.names = NA)
+coldata
+```
+
+## Run differential expression
+
+```{r rna2, warning=F, message=F}
+
+dds <- DESeqDataSetFromMatrix(countData = counts[rowSums(counts) > 10, ],
+                              colData = coldata,
+                              design= ~ condition)
+dds <- DESeq(dds)
+resultsNames(dds) # lists the coefficients
+rlog <- rlogTransformation(dds)
+write.table(assay(rlog), file="~/Code/sys_bio/Part_2/materials/GSE137888_rlog.tsv", sep="\t", quote=F, col.names = NA)
+
+```
+
+## Run VST for PCA, run PCA
+
+```{r rna3, warning=F, message=F}
+
+vst <- varianceStabilizingTransformation(dds)
+# plotPCA(vst, intgroup=c("condition"), ntop=nrow(vst)) + theme_bw()
+pcaData <- pca(assay(vst), metadata=coldata)
+biplot(pcaData, colby="condition", legendPosition = "right")
+
+
+plotloadings(pcaData) + theme_bw(base_size=8)
+head(results(dds))
+
+```
+
+## Get volcano plots
+
+```{r rna4, warning=F, message=F }
+res <- lfcShrink(dds, coef="condition_Prdm16_vs_Control", type="apeglm")
+head(res)
+# keytypes(org.Mm.eg.db)
+res$Gene.symbol <- mapIds(org.Mm.eg.db, gsub("\\.\\d+", "", rownames(res)), column="SYMBOL", keytype="ENSEMBL")
+
+resDF <- as.data.frame(res)
+volcanoPlot <- ggplot(resDF, aes(x=log2FoldChange, y=-log10(padj), color=padj < 0.05)) +
+  geom_point() + theme_bw() + scale_color_manual(values=c("black", "red"))
+volcanoPlot <- volcanoPlot +
+  geom_text_repel(data=resDF %>% dplyr::filter(padj < 1e-14), aes(label=Gene.symbol), color="black")
+
+volcanoPlot <- volcanoPlot +
+  xlim(c(-6, 6)) +
+  xlab("Prdm16     Log2FC    Control") +
+  geom_vline(xintercept = 0, lty=2) +
+  theme(aspect.ratio = 1)
+volcanoPlot
+```
+
+## Pathway analysis
+
+```{r pressure, echo=FALSE, warning=F, message=F}
+
+library(fgsea)
+
+deResults <- results(dds)
+deResults$Gene.symbol <- mapIds(org.Mm.eg.db, gsub("\\.\\d+", "", rownames(deResults)), column="SYMBOL", "ENSEMBL")
+stats <- deResults$stat
+names(stats) <- deResults$Gene.symbol
+```
+
+```{r pressure1, echo=FALSE, warning=F, message=F}
+load("~/Code/sys_bio/Part_2/materials/keggSymbolMouse.rdata")
+fgseaResults <- fgseaMultilevel(keggSymbolMouse, stats, minSize = 15, maxSize = 500)
+# head(fgseaResults, 3)
+
+topPathwaysUp <- fgseaResults[ES > 0, ][head(order(pval), n=8), pathway]
+topPathwaysDown <- fgseaResults[ES < 0, ][head(order(pval), n=8), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+# topPathways
+plotGseaTable(keggSymbolMouse[topPathways], stats, fgseaResults, gseaParam = 0.5,
+              pathwayLabelStyle=list(size=6))
+```
